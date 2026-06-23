@@ -21,6 +21,10 @@ export function setMagicContextRecompActive(
 	else recompSessions.delete(sessionId);
 }
 
+export function isMagicContextRecompActive(sessionId: string): boolean {
+	return recompSessions.has(sessionId);
+}
+
 type SessionMetaStatus = {
 	compartment_in_progress: number | null;
 	historian_failure_count: number | null;

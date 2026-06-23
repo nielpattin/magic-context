@@ -17,42 +17,22 @@ import type {
 } from "@magic-context/core/shared/subagent-runner";
 
 /**
- * Resolve the Pi CLI entry that should be spawned for historian/dreamer/
- * sidekick subagents.
+ * Resolve the Pi CLI entry to spawn for historian/dreamer/sidekick subagents:
+ * the SAME cli.js the host Pi process is running.
  *
- * Why this isn't just "pi": when the Pi plugin runs inside an interactive
- * `pi` session, that user has the `pi` binary on PATH and `spawn("pi", ...)`
- * works. But in other deployment shapes the plugin runs without that:
- *   - CI runners and e2e harnesses: Pi is installed only into node_modules
- *     via `bun install` / `npm install`. No `pi` symlink on PATH.
- *   - npm-only user installs: same shape — `@earendil-works/pi-coding-agent`
- *     is in node_modules but its bin entry isn't globally linked.
- *   - Any environment where the user uses `npx` rather than the
- *     globally-installed Pi CLI.
+ * The plugin runs inside the host Pi process, so `process.argv[1]` is the
+ * cli.js Node was invoked with — e.g. pnpm's global `pi` shim runs
+ * `node .../dist/cli.js`. Reusing it means the spawned child runs the exact
+ * Pi version the user installed (not a divergent dev-dep copy), and it
+ * sidesteps two Windows spawn failures that the old "spawn the .js path
+ * directly / fall back to `pi` on PATH" strategy hit:
+ *   - spawning a `.js` path directly fails (Windows ignores shebangs) → EINVAL
+ *   - spawning `"pi"` fails (pnpm ships a `.cmd` shim; `spawn` without
+ *     `shell:true` cannot run `.cmd`) → ENOENT  (cortexkit/magic-context#177)
  *
- * Strategy: try to resolve `@earendil-works/pi-coding-agent`'s package.json
- * via Node's `require.resolve` rooted at this module, then spawn the
- * package's `dist/cli.js` directly. Pi's CLI ships with `#!/usr/bin/env node`
- * and npm sets the exec bit during install, so the OS spawns it under Node
- * with no extra runtime needed. Fall back to plain `pi` on PATH so the
- * happy path for interactive Pi users is unchanged.
- *
- * Returns null when resolution fails — caller falls back to "pi" on PATH.
+ * The caller wraps this path in `process.execPath` (node) at spawn time
+ * (`spawnViaNode`) so the `.js` entry runs under Node on every platform.
  */
-function resolveBundledPiCli(): string | null {
-	try {
-		const require_ = createRequire(import.meta.url);
-		const pkgJson = require_.resolve(
-			"@earendil-works/pi-coding-agent/package.json",
-		);
-		const cliPath = join(dirname(pkgJson), "dist/cli.js");
-		if (existsSync(cliPath)) return cliPath;
-		return null;
-	} catch {
-		return null;
-	}
-}
-
 /** How to spawn a Pi child: the binary plus any fixed leading args. Always
  *  spawned without a shell (see {@link resolvePiInvocation}). */
 interface PiInvocation {
@@ -134,9 +114,9 @@ function resolveSubagentEntryPath(): string | undefined {
 		// Resolve from the current module's directory. In dev (running
 		// .ts via Bun) and in prod (running .js from dist/), this lands
 		// in the same directory as the runner itself.
-		const here = dirname(fileURLToPath(import.meta.url));
-		const candidate = resolvePath(here, "subagent-entry.js");
-		if (existsSync(candidate)) return candidate;
+		const here = path.dirname(fileURLToPath(import.meta.url));
+		const candidate = path.resolve(here, "subagent-entry.js");
+		if (fs.existsSync(candidate)) return candidate;
 
 		// Dev fallback: when running source from packages/pi-plugin/src/
 		// the .js bundle doesn't exist yet; skip the --extension flag so
@@ -413,14 +393,73 @@ export class PiSubagentRunner implements SubagentRunner {
 		}
 		// Large prompts (e.g. a ~50K-token historian chunk ≈ 200 KB) overflow
 		// Linux's per-argv-entry limit (MAX_ARG_STRLEN, 128 KiB) and make spawn()
-		// fail with E2BIG. Above PROMPT_ARGV_MAX_BYTES, deliver the prompt via
-		// piped stdin (Pi's print mode concatenates stdin into the initial
+		// fail with E2BIG. Above PROMPT_ARGV_MAX_BYTES, deliver the user message
+		// via piped stdin (Pi's print mode concatenates stdin into the initial
 		// message) and omit the positional argv to avoid duplicating it.
+		//
+		// On Windows, the ENTIRE command line is limited to 32,767 chars by
+		// CreateProcessW. The historian system prompt
+		// (COMPARTMENT_AGENT_SYSTEM_PROMPT, ~60KB) alone exceeds this, so we
+		// cannot pass it via `--system-prompt` in argv. Instead, buildArgs emits
+		// a short role-label system prompt (SHORT_SYSTEM_PROMPT_LABEL) and we
+		// prepend the full system prompt to the stdin content (which becomes
+		// part of the user message). The model sees a neutral "you are a
+		// historian" system prompt followed by the full historian instructions
+		// at the top of the user content. With a neutral system prompt (not
+		// Pi's conflicting "coding agent" default), the historian instructions
+		// in the user content take effect.
+		//
+		// This is the ENAMETOOLONG fix for Windows that the prior ENOENT fix
+		// (#177) unmasked — once `resolveHostPiCli()` + `process.execPath` let
+		// subagent spawns succeed on Windows, the 32K cmdline limit immediately
+		// surfaced because the historian prompt is a 60KB string.
 		const promptBytes = Buffer.byteLength(options.userMessage, "utf8");
-		const deliverViaStdin = promptBytes > PROMPT_ARGV_MAX_BYTES;
+		const isWindows = process.platform === "win32";
+		const hasSp =
+			typeof options.systemPrompt === "string" && options.systemPrompt.length > 0;
+
+		// Windows-only: estimate total cmdline with everything present (system
+		// prompt + user message + flags). On Linux this is irrelevant — only
+		// the per-arg MAX_ARG_STRLEN matters.
+		const fullCmdline = isWindows
+			? estimateCmdlineLength(
+					buildArgs(options, {
+						omitPositionalMessage: false,
+						omitSystemPrompt: false,
+					}),
+					process.execPath,
+					this.invocation.command,
+				)
+			: 0;
+
+		// floodStd: on Windows, the total cmdline exceeds the safe 24K limit.
+		// The system prompt (if present) is too large for argv, so move it into
+		// stdin content and emit a short role-label instead.
+		const floodStd = isWindows && hasSp && fullCmdline > WINDOWS_CMDLINE_SAFE_MAX;
+
+		// deliverViaStdin: the user message goes through piped stdin when:
+		//   - It exceeds Linux's per-arg limit (MAX_ARG_STRLEN, 128 KiB), OR
+		//   - On Windows, the total cmdline exceeds 24K. This also covers the
+		//     floodStd case (floodStd implies fullCmdline > 24K), ensuring the
+		//     user message rides through stdin alongside the system prompt —
+		//     the only delivery channel left. Without this, the system prompt
+		//     would be dropped entirely (not in argv, not piped).
+		const deliverViaStdin =
+			promptBytes > PROMPT_ARGV_MAX_BYTES ||
+			(isWindows && fullCmdline > WINDOWS_CMDLINE_SAFE_MAX);
+
 		const args = buildArgs(options, {
 			omitPositionalMessage: deliverViaStdin,
+			shortSystemPrompt: floodStd,
 		});
+
+		// On the flood path, prepend the full system prompt to the stdin
+		// content so the model still receives the detailed historian
+		// instructions — just as user content rather than system content.
+		const stdinContent =
+			floodStd && typeof options.systemPrompt === "string"
+				? `${options.systemPrompt}\n\n${options.userMessage}`
+				: options.userMessage;
 
 		// The model spec is `provider/model` — Pi accepts that directly via
 		// `--model provider/id` (no separate `--provider` flag needed). When a
@@ -520,7 +559,7 @@ export class PiSubagentRunner implements SubagentRunner {
 					// EPIPE / destroyed-stream: non-fatal runner noise.
 				});
 				try {
-					child.stdin.end(options.userMessage, "utf8");
+					child.stdin.end(stdinContent, "utf8");
 				} catch {
 					// Synchronous throw (e.g. already-destroyed stream); exit/stderr
 					// handlers below surface the actual failure.
@@ -658,13 +697,13 @@ export class PiSubagentRunner implements SubagentRunner {
 					});
 				}
 
-				// Forward the full parsed event so debug callers can write
-				// a complete trace to the log. Emitted unconditionally and
-				// before any branch-specific handling so even unexpected
-				// event types end up in the log.
-				emitProgress({
-					type: "raw_event",
-					eventType: typeof e.type === "string" ? e.type : undefined,
+			// Forward the full parsed event so debug callers can write
+			// a complete trace to the log. Emitted unconditionally and
+			// before any branch-specific handling so even unexpected
+			// event types end up in the log.
+			emitProgress({
+				type: "raw_event",
+				eventType: typeof e.type === "string" ? e.type : undefined,
 					event,
 					ms: elapsedMs,
 				});
@@ -961,6 +1000,53 @@ function isFallbackEligible(reason: string): boolean {
 export const PROMPT_ARGV_MAX_BYTES = 96 * 1024;
 
 /**
+ * Safe maximum for the total command-line length on Windows.
+ * CreateProcessW has a 32,767 character limit; we use 24K for safety
+ * to leave headroom for libuv's quoting/escaping expansion.
+ */
+export const WINDOWS_CMDLINE_SAFE_MAX = 24_000;
+
+/**
+ * Short role-label system prompt used on the Windows flood path (when the
+ * full system prompt is too large for CreateProcessW's 32K cmdline limit).
+ * The full system prompt is prepended to stdin content instead; this label
+ * just replaces Pi's default "coding agent" prompt so it doesn't conflict
+ * with the historian/dreamer/sidekick role described in the user content.
+ */
+export const SHORT_SYSTEM_PROMPT_LABEL =
+	"You are a conversation historian. Produce structured compartment summaries following the format specified in the user message.";
+
+/**
+ * Estimate the total command-line string length that child_process.spawn
+ * constructs on Windows (joined by spaces, with quoting for special chars).
+ * Returns a conservative upper bound used to pre-detect ENAMETOOLONG before
+ * the actual spawn call fails.
+ */
+export function estimateCmdlineLength(
+	args: string[],
+	execPath: string,
+	piBinary: string,
+): number {
+	let total = execPath.length + 1 + piBinary.length;
+	for (const arg of args) {
+		total += 1; // leading space separator
+		if (
+			arg.includes(" ") ||
+			arg.includes("\t") ||
+			arg.includes('"') ||
+			arg.includes("\\")
+		) {
+			// libuv wraps in double quotes, escaping embedded quotes/backslashes.
+			// Conservatively assume worst-case 2x overhead.
+			total += arg.length * 2 + 2;
+		} else {
+			total += arg.length;
+		}
+	}
+	return total;
+}
+
+/**
  * Build the argv for one `pi --print --mode json` invocation.
  *
  * Argument ordering matters: print mode treats positional args as
@@ -973,7 +1059,11 @@ export const PROMPT_ARGV_MAX_BYTES = 96 * 1024;
  */
 export function buildArgs(
 	options: SubagentRunOptions,
-	opts?: { omitPositionalMessage?: boolean },
+	opts?: {
+		omitPositionalMessage?: boolean;
+		omitSystemPrompt?: boolean;
+		shortSystemPrompt?: boolean;
+	},
 ): string[] {
 	const args: string[] = [
 		"--print",
@@ -1059,7 +1149,18 @@ export function buildArgs(
 		}
 	}
 
-	if (options.systemPrompt && options.systemPrompt.length > 0) {
+	if (opts?.shortSystemPrompt) {
+		// Windows flood path: the full system prompt is too large for argv
+		// (CreateProcessW 32K limit). Emit a short role label instead — the
+		// full prompt is prepended to stdin content by the caller. This
+		// replaces Pi's default "coding agent" prompt so it doesn't conflict
+		// with the historian/dreamer/sidekick role in the user content.
+		args.push("--system-prompt", SHORT_SYSTEM_PROMPT_LABEL);
+	} else if (
+		options.systemPrompt &&
+		options.systemPrompt.length > 0 &&
+		!opts?.omitSystemPrompt
+	) {
 		// We intentionally use --system-prompt (replace) rather than
 		// --append-system-prompt (chain) because subagents are one-shot
 		// and have their own focused system prompt. Mixing in Pi's

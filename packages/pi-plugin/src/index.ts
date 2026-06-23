@@ -92,6 +92,7 @@ import { registerCtxFlushCommand } from "./commands/ctx-flush";
 import { registerCtxRecompCommand } from "./commands/ctx-recomp";
 import { registerCtxSessionUpgradeCommand } from "./commands/ctx-session-upgrade";
 import { registerCtxStatusCommand } from "./commands/ctx-status";
+import { registerMcStreamCommand } from "./commands/mc-stream";
 import { loadPiConfig } from "./config";
 import {
 	awaitInFlightHistorians,
@@ -825,6 +826,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		resolveProject: resolveCurrentProject,
 	});
 	info("registered /ctx-embed");
+
+	registerMcStreamCommand(pi);
+	info("registered /mc-stream");
 
 	// Register Pi project with the singleton dreamer timer. When dreamer is
 	// disabled in config (default) this is a no-op. When enabled, the timer

@@ -39,6 +39,7 @@
 
 import * as crypto from "node:crypto";
 import { withContentLanguageDirective } from "@magic-context/core/agents/language-directive";
+import { getStreamBus } from "./subagent-stream-bus";
 import { embedAndStoreCompartmentChunks } from "@magic-context/core/features/magic-context/compartment-embedding";
 import { insertCompartmentEvents } from "@magic-context/core/features/magic-context/compartment-events";
 import { isCompartmentLeaseHeld } from "@magic-context/core/features/magic-context/compartment-lease";
@@ -551,8 +552,25 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// inspection, set MC_PI_HISTORIAN_TRACE=1 to opt into raw-event
 			// logging without rebuilding.
 			const traceRawEvents = process.env.MC_PI_HISTORIAN_TRACE === "1";
+			const streamBus = getStreamBus();
 			const buildProgressLogger = (passLabel: string) => {
+				const runId = crypto.randomUUID();
+				const label = `historian[${passLabel}]`;
+				let started = false;
 				return (event: SubagentProgressEvent) => {
+					// Publish to the stream bus for the live TUI view.
+					try {
+						if (!started && event.type === "spawned") {
+							streamBus.startRun(runId, label, historianModel);
+							started = true;
+						}
+						streamBus.publish(runId, label, event);
+						if (event.type === "child_exit") {
+							streamBus.finishRun(runId, event.code === 0);
+						}
+					} catch {
+						// Bus errors must not crash the runner.
+					}
 					try {
 						if (event.type === "spawned") {
 							sessionLog(

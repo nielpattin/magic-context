@@ -1,4 +1,6 @@
+import * as crypto from "node:crypto";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
+import { getStreamBus } from "./subagent-stream-bus";
 
 /**
  * Shared OpenCode-client emulation backed by a Pi `SubagentRunner`.
@@ -22,6 +24,8 @@ export function createPiHistorianClient(args: {
 }) {
 	const sessions = new Map<string, unknown[]>();
 	let counter = 0;
+	let recompPass = 0;
+	const streamBus = getStreamBus();
 	async function prompt(input: unknown): Promise<Record<string, never>> {
 		const body = readBody(input);
 		const sessionId = readPathId(input);
@@ -41,6 +45,9 @@ export function createPiHistorianClient(args: {
 		// override is present, let the override own the model and disable the
 		// runner-level chain for this call (the shared layer owns iteration).
 		const modelOverride = readBodyModel(body);
+		const recompRunId = crypto.randomUUID();
+		const recompPassLabel = `recomp[${++recompPass}]`;
+		let recompStarted = false;
 		const result = await args.runner.run({
 			agent: "magic-context-historian",
 			systemPrompt: args.systemPrompt,
@@ -52,6 +59,20 @@ export function createPiHistorianClient(args: {
 			thinkingLevel: args.thinkingLevel,
 			accountingSessionId: args.accountingSessionId,
 			accountingSubagent: "recomp",
+			onProgress: (event) => {
+				try {
+					if (!recompStarted && event.type === "spawned") {
+						streamBus.startRun(recompRunId, recompPassLabel, modelOverride ?? args.model);
+						recompStarted = true;
+					}
+					streamBus.publish(recompRunId, recompPassLabel, event);
+					if (event.type === "child_exit") {
+						streamBus.finishRun(recompRunId, event.code === 0);
+					}
+				} catch {
+					// Bus errors must not crash the runner.
+				}
+			},
 		});
 		if (!result.ok) {
 			throw new Error(

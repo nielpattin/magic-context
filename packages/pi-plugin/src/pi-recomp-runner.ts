@@ -4,6 +4,9 @@ import {
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { setMagicContextRecompActive } from "./status-line";
+import { getStreamBus } from "./subagent-stream-bus";
+
+let recompBusRunCounter = 0;
 
 /**
  * In-flight detached recomp / upgrade runs, keyed by session, so the
@@ -57,12 +60,17 @@ export function spawnPiRecompRun(args: {
 	work: () => Promise<void>;
 }): void {
 	const { sessionId, provider, onStatusChange, work } = args;
+	const recompBusRunId = `recomp-run-${++recompBusRunCounter}`;
+	const bus = getStreamBus();
+	bus.startRun(recompBusRunId, "recomp/upgrade");
+	let ok = false;
 	const unregister = setRawMessageProvider(sessionId, provider);
 	setMagicContextRecompActive(sessionId, true);
 	onStatusChange();
 	const runPromise = (async () => {
 		try {
 			await work();
+			ok = true;
 		} catch (err) {
 			sessionLog(
 				sessionId,
@@ -74,6 +82,15 @@ export function spawnPiRecompRun(args: {
 		setMagicContextRecompActive(sessionId, false);
 		unregister();
 		onStatusChange();
+		// If no subagent events were published (skip/no-op), remove the run
+		// from the bus instead of marking it done — avoids showing an empty
+		// "DONE" entry in /mc-stream that shadows real background runs.
+		const run = bus.getRun(recompBusRunId);
+		if (run && run.events.length === 0) {
+			bus.removeRun(recompBusRunId);
+		} else {
+			bus.finishRun(recompBusRunId, ok);
+		}
 	});
 	inFlightRecomp.set(sessionId, runPromise);
 }
