@@ -192,12 +192,11 @@ function warn(message: string, data?: unknown): void {
 // the (idempotent, lock-guarded) migration on every pass. Fails open.
 const migratedConfigDirs = new Set<string>();
 function ensureConfigLocationsMigrated(dir: string): void {
+	// Pi fork: config stays at ~/.pi/agent/ (per FORK-SYNC.md).
+	// The CortexKit config-location migration is intentionally skipped
+	// so the config remains fork-agnostic at the Pi path.
 	if (migratedConfigDirs.has(dir)) return;
 	migratedConfigDirs.add(dir);
-	migrateMagicContextConfigLocations(dir, {
-		warn: (m) => warn(m),
-		info: (m) => info(m),
-	});
 }
 
 function formatTokens(value: number): string {
