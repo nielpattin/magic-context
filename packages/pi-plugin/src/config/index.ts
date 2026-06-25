@@ -65,17 +65,18 @@ interface LoadedConfigFile {
 	loadOutcome: LoadOutcome;
 }
 
-// Pi fork: config is read from Pi's own locations (~/.pi/agent/ for user,
-// <project-root>/.pi/ for project). This keeps the config fork-agnostic at
-// the Pi path as documented in FORK-SYNC.md, and bypasses the CortexKit
-// config-location migration entirely.
+// Pi fork: user config is read from the shared CortexKit XDG location
+// (~/.config/cortexkit/magic-context.jsonc), so the same config is shared
+// with the OpenCode harness. Project config stays at Pi's own location
+// (<project-root>/.pi/) for project-scoped overrides.
 function getProjectConfigPaths(cwd: string): string[] {
 	const basePath = join(cwd, ".pi", CONFIG_FILE_NAME);
 	return [`${basePath}.jsonc`, `${basePath}.json`];
 }
 
 function getUserConfigPaths(): string[] {
-	const basePath = join(homedir(), ".pi", "agent", CONFIG_FILE_NAME);
+	const configHome = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
+	const basePath = join(configHome, "cortexkit", CONFIG_FILE_NAME);
 	return [`${basePath}.jsonc`, `${basePath}.json`];
 }
 
