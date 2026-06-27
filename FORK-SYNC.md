@@ -1,7 +1,7 @@
 # Magic Context Fork — Sync & Maintenance Runbook
 
 This is the **local Pi fork** of [`cortexkit/magic-context`](https://github.com/cortexkit/magic-context).
-Upstream is tracked as `origin`; all local changes live on the **`pi-local`** branch. Never commit on `master`.
+Upstream (`cortexkit/magic-context`) is tracked as the `upstream` remote; the fork (`nielpattin/magic-context`) is `origin`. All local changes live on the **`pi-local`** branch. Never commit on `master`.
 
 Read this doc whenever you need to update the fork from upstream or apply a local fix.
 
@@ -10,12 +10,12 @@ Read this doc whenever you need to update the fork from upstream or apply a loca
 | What | Value |
 | --- | --- |
 | Fork path | `C:\Users\niel\.pi\agent\magic-context` |
-| Working branch | `pi-local` (based on `origin/master`; at setup: HEAD `f3e681b`, past tag `v0.26.0`) |
-| Upstream remote | `origin` → `https://github.com/cortexkit/magic-context` |
+| Working branch | `pi-local` (rebased onto `upstream/master` @ `280e0dad` = v0.29.0; local commits on top) |
+| Upstream remote | `upstream` → `https://github.com/cortexkit/magic-context` (fork `origin` → `nielpattin/magic-context`) |
 | Pi extension package | `packages/pi-plugin` (`@cortexkit/pi-magic-context`), flat self-contained `src/` |
 | Build output | `packages/pi-plugin/dist/index.js` (+ `dist/subagent-entry.js`) |
 | Pi registration | `~/.pi/agent/settings.json` → `packages` entry: source `...\magic-context\packages\pi-plugin`, extensions `["+dist\index.js"]` |
-| Pi config | `~/.pi/agent/magic-context.jsonc` (fork-agnostic; schema: `assets/magic-context.schema.json`) |
+| Pi config | `~/.config/cortexkit/magic-context.jsonc` (XDG, shared with the OpenCode harness; schema: `assets/magic-context.schema.json`). Project overrides at `<root>/.pi/magic-context.jsonc`. |
 
 ### How Pi loads the fork
 Pi loads the **built** `packages/pi-plugin/dist/index.js`, not source. So after **any** code change you must **rebuild** and **restart Pi**.
@@ -31,9 +31,9 @@ Our fork clones upstream as-is, so local `packages/pi-plugin/src/` mirrors upstr
 
 ---
 
-## Local patches on `pi-local` (uncommitted)
+## Local patches on `pi-local` (committed)
 
-The following changes are staged/unstaged on `pi-local` on top of the upstream base. They have NOT been committed yet.
+The following changes are committed on `pi-local` on top of the upstream base (`280e0dad`, v0.29.0).
 
 ### 1. Windows subagent spawn fixes (`subagent-runner.ts`)
 
@@ -41,7 +41,8 @@ Three bugs prevented the historian/dreamer/sidekick subagent from spawning on Wi
 
 #### 1a. ENOENT — `pi` binary not found (cortexkit/magic-context#177)
 - **Root cause:** `resolveBundledPiCli()` used CJS `require.resolve("@earendil-works/pi-coding-agent/package.json")`, but that package is ESM-only (exports has no `require` condition) → throws `ERR_PACKAGE_PATH_NOT_EXPORTED` → returns null → falls back to `spawn("pi")` → Windows can't execute the pnpm `.cmd` shim without `shell:true` → `ENOENT`.
-- **Fix:** Removed `resolveBundledPiCli()`. Added `resolveHostPiCli()` which returns `process.argv[1]` (the host Pi's own `cli.js` path, since the plugin runs inside the host `pi` process invoked as `node .../dist/cli.js`). The runner spawns `process.execPath` with `[cli.js, ...args]` via a `spawnViaNode` flag. No bundled/PATH fallback. The child runs the SAME Pi version as the host (0.79.x, not the stale bundled 0.74.0 dev-dep).
+- **Fix:** `resolvePiInvocation()` now resolves the host invocation in cross-platform order: (1) if `process.argv[1]` is a real on-disk script (not a bun `/$bunfs/root/` virtual path), spawn `process.execPath` with `[argv[1], ...args]` — i.e. re-invoke the EXACT host `cli.js` the user is already running, no PATH lookup, no `.cmd` shim; (2) if `execPath` is a packaged single-file binary (basename not node/bun), spawn it directly; (3) fallback `resolveBundledPiCli()` reimplemented via `createRequire(import.meta.url)` (bypasses the ESM `require.resolve` error) to resolve the bundled `dist/cli.js`; (4) last resort bare `pi` on PATH. The child runs the SAME Pi version as the host (0.79.x, not the stale bundled 0.74.0 dev-dep).
+- **History note:** commit `abc99e1e` shipped this half-applied (deleted the `resolveBundledPiCli` definition but left the call site at line 91; `createRequire` imported but unused; `resolveSubagentEntryPath` still used bare `path.`/`fs.`). Commit `95a4b038` completed it and fixed the named-import call sites so the `-x subagent-entry.js` flag is actually set again.
 
 #### 1b. ENAMETOOLONG — system prompt exceeds Windows 32K cmdline limit
 - **Root cause:** After the ENOENT fix let spawns succeed, Windows' `CreateProcessW` 32,767 character command-line limit was immediately exposed. The historian system prompt (~60KB) passed via `--system-prompt` in argv alone exceeds this limit.
@@ -100,17 +101,17 @@ Four new files provide a `/mc-stream` slash command that opens a full-screen ove
 ### 1. Fetch latest
 ```bash
 cd ~/.pi/agent/magic-context
-git fetch origin --tags
+git fetch upstream --tags
 ```
 See what's new:
 ```bash
 git tag -l 'v0.*' | sort -V | tail          # latest tags
-git log --oneline pi-local..origin/master    # commits upstream has that pi-local lacks
+git log --oneline pi-local..upstream/master    # commits upstream has that pi-local lacks
 ```
 
 ### 2. Inspect the new version in a throwaway worktree (don't touch pi-local)
 ```bash
-git worktree add --detach ~/.cache/mc-new <new-tag>   # or origin/master
+git worktree add --detach ~/.cache/mc-new <new-tag>   # or upstream/master
 ```
 (For read-only inspection you can also point the librarian skill at `cortexkit/magic-context`.)
 
@@ -135,7 +136,7 @@ sed -n '1,80p' ~/.cache/mc-new/CHANGELOG.md
 Clean up the worktree when done: `git worktree remove --force ~/.cache/mc-new`
 
 ### 4. Update pi-local
-- **Rebase (recommended):** `git checkout pi-local && git rebase <new-tag>` (or `origin/master`).
+- **Rebase (recommended):** `git checkout pi-local && git rebase <new-tag>` (or `upstream/master`).
   - If pi-local has local fixes, rebase replays them; resolve conflicts per file. The local patches above (especially `subagent-runner.ts`) will likely conflict if upstream touches the same areas.
 - **Selective:** cherry-pick specific commits with `git cherry-pick <sha>`.
 
@@ -147,7 +148,7 @@ Then **restart Pi** to load the new `dist/index.js`.
 
 ### 6. Verify
 - Restart Pi; confirm magic-context loads with no extension errors.
-- If upstream changed the config schema, diff `assets/magic-context.schema.json` and merge any new keys into `~/.pi/agent/magic-context.jsonc`.
+- If upstream changed the config schema, diff `assets/magic-context.schema.json` and merge any new keys into `~/.config/cortexkit/magic-context.jsonc`.
 - Verify `/mc-stream` works during a `/ctx-recomp` run.
 - Verify subagent spawn works on Windows (historian auto-triggers or manual `/ctx-recomp`).
 
@@ -162,7 +163,7 @@ cd packages/pi-plugin && bun run build
 # restart Pi to load the rebuilt dist
 git add -p && git commit -m "fix(pi-plugin): <what>"
 ```
-To later pull upstream on top of local fixes: `git fetch origin && git rebase origin/master`, then rebuild.
+To later pull upstream on top of local fixes: `git fetch upstream && git rebase upstream/master`, then rebuild.
 
 ---
 
@@ -171,7 +172,12 @@ To later pull upstream on top of local fixes: `git fetch origin && git rebase or
 - **Don't bundle runtime externals** (`@earendil-works/pi-*`, `@huggingface/transformers`, `node:sqlite`) — they're provided by Pi.
 - **Always rebuild after code changes** — Pi loads `dist/`, not `src/`.
 - The old `@nielpattin/pi-magic-context` monorepo package was removed (pi-packages commit `ed89ed9`). This fork is the only magic-context.
-- **Windows spawn fixes are critical:** without the `subagent-runner.ts` patches, the historian/dreamer/sidekick cannot spawn on Windows (ENOENT, ENAMETOOLONG, or coding-agent role corruption). If rebasing onto a new upstream version, these patches MUST be preserved.
+- **Windows spawn fixes are critical:** without the `subagent-runner.ts` patches, the historian/dreamer/sidekick cannot spawn on Windows (ENOENT, ENAMETOOLONG, or coding-agent role corruption). If rebasing onto a new upstream version, these patches MUST be preserved. The `argv[1]` primary path (step 1 of `resolvePiInvocation`) is what makes spawn work on Windows; `resolveBundledPiCli` via `createRequire` is a fallback only.
+- **`mc-stream.ts` has pre-existing `tsc` drift errors** (`role` on `CustomMessage` line 25; `Theme` type mismatch line 42) against the bundled Pi 0.74.0 types. Type-only, not runtime-breaking; `bun build` ignores them. Clean up if a typecheck gate is added.
+
+## Sync history
+
+- **2026-06-27** — Rebased `pi-local` onto `upstream/master` @ `280e0dad` (v0.29.0). Brought in v0.27.3 → v0.29.0: `smart_drops` (opt-in supersession reclaim), `language` (ISO 639-1 output language), `ctx_memory` gating when `memory.enabled: false`, `maintain-docs` no longer flattens hand-authored docs, commit-detection unification, large→small model-switch overflow fix (#188), smart-note sandbox serialization. One rebase conflict (`pi-historian-runner.ts` import collision) resolved — both `withContentLanguageDirective` and `getStreamBus` kept. `smart_drops: true` enabled in `~/.config/cortexkit/magic-context.jsonc`. Completed the half-applied `subagent-runner.ts` Windows spawn fix (commit `95a4b038`). DB schema unchanged (`LATEST_SUPPORTED_VERSION` still 49). Pre-existing `mc-stream.ts` tsc drift left as-is.
 - **Thinking content field:** Pi uses `block.thinking` for thinking blocks, not `block.text`. Any extraction code must check `b.thinking`.
 - **`/mc-stream` event bus is process-global:** the bus singleton survives across command invocations within the same Pi process. Runs are cleaned up on `child_exit` or when a skip/no-op produces zero events.
 
