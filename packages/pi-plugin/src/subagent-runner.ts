@@ -41,6 +41,26 @@ interface PiInvocation {
 }
 
 /**
+ * Resolve the bundled `@earendil-works/pi-coding-agent` CLI entry. Fallback only
+ * — used when the host's `argv[1]` isn't a usable on-disk script (e.g. a
+ * bun-compiled `/$bunfs/root/` virtual path). `createRequire` bypasses the
+ * ESM `require.resolve` limitation that broke the original impl (#177).
+ */
+function resolveBundledPiCli(): string | null {
+	try {
+		const require = createRequire(import.meta.url);
+		const pkgJsonPath = require.resolve(
+			"@earendil-works/pi-coding-agent/package.json",
+		);
+		const cliPath = resolvePath(dirname(pkgJsonPath), "dist", "cli.js");
+		return existsSync(cliPath) ? cliPath : null;
+	} catch {
+		return null;
+	}
+}
+
+
+/**
  * Resolve how to spawn a Pi subagent, robust across POSIX and Windows.
  *
  * The key fix (#177): never depend on a bare `pi` on PATH or on a POSIX
@@ -114,9 +134,9 @@ function resolveSubagentEntryPath(): string | undefined {
 		// Resolve from the current module's directory. In dev (running
 		// .ts via Bun) and in prod (running .js from dist/), this lands
 		// in the same directory as the runner itself.
-		const here = path.dirname(fileURLToPath(import.meta.url));
-		const candidate = path.resolve(here, "subagent-entry.js");
-		if (fs.existsSync(candidate)) return candidate;
+		const here = dirname(fileURLToPath(import.meta.url));
+		const candidate = resolvePath(here, "subagent-entry.js");
+		if (existsSync(candidate)) return candidate;
 
 		// Dev fallback: when running source from packages/pi-plugin/src/
 		// the .js bundle doesn't exist yet; skip the --extension flag so
