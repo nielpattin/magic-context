@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-const CONFIG_FILE_NAME = "magic-context.jsonc";
+const CONFIG_FILE_NAME = "magic-context";
 
 import { migrateLegacyAgentEnabledInMemory } from "@magic-context/core/config/agent-disable";
 import { migrateDreamerV2 } from "@magic-context/core/config/migrate-dreamer-v2";
