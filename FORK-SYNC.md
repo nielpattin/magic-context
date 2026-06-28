@@ -10,7 +10,7 @@ Read this doc whenever you need to update the fork from upstream or apply a loca
 | What | Value |
 | --- | --- |
 | Fork path | `C:\Users\niel\.pi\agent\magic-context` |
-| Working branch | `pi-local` (rebased onto `upstream/master` @ `4119f898` = v0.29.1; local commits on top) |
+| Working branch | `pi-local` (rebased onto `upstream/master` @ `f3f79c71` = dashboard v0.8.3; local commits on top) |
 | Upstream remote | `upstream` → `https://github.com/cortexkit/magic-context` (fork `origin` → `nielpattin/magic-context`) |
 | Pi extension package | `packages/pi-plugin` (`@cortexkit/pi-magic-context`), flat self-contained `src/` |
 | Build output | `packages/pi-plugin/dist/index.js` (+ `dist/subagent-entry.js`) |
@@ -177,6 +177,7 @@ To later pull upstream on top of local fixes: `git fetch upstream && git rebase 
 
 ## Sync history
 
+- **2026-06-28 (b)** — Rebased `pi-local` onto `upstream/master` @ `f3f79c71` (dashboard v0.8.3). 10 commits, all dashboard/docs/deps chore (Tauri 2.11.3 stack, Astro 7 + Starlight 0.41, dep refresh + security alerts, dashboard model picker + cache-view tweaks, release-draft arch-split fix). **Zero `packages/pi-plugin/src` changes** in range — pure base-pointer move, no overlap with local patches. Rebase clean (merge-tree exit 0). Build OK (749 modules). Config still loads (`historian.model` + `smart_drops` verified via diag; user changed historian model to `opencode/deepseek-v4-flash-free`).
 - **2026-06-28** — Rebased `pi-local` onto `upstream/master` @ `4119f898` (v0.29.1 / dashboard v0.8.2). Brought in v0.29.0 → v0.29.1 (13 commits): Pi provider-id translation at spawn boundary (`openai`→`openai-codex`, `google`→`google-antigravity`, commit `77f752dc` — touches `subagent-runner.ts` `buildArgs`, disjoint from the Windows spawn patches so no conflict), Channel 2 nudge delivered via in-process client (removes live-server workaround), exit-abort registered once process-wide, `ctx_note` defaults to read on empty content, dreamer sidebar last-run reads `task_schedule_state` (#194), storage-db↔migrations cycle broken + dead-code removal, docs sync. Rebase was clean (merge-tree exit 0; one transient stale-`index.lock` pause on the final commit, resolved with `git rebase --continue`). DB schema unchanged. Build OK (749 modules). Config still loads (`historian.model` + `smart_drops` verified via diag).
 - **2026-06-27** — Rebased `pi-local` onto `upstream/master` @ `280e0dad` (v0.29.0). Brought in v0.27.3 → v0.29.0: `smart_drops` (opt-in supersession reclaim), `language` (ISO 639-1 output language), `ctx_memory` gating when `memory.enabled: false`, `maintain-docs` no longer flattens hand-authored docs, commit-detection unification, large→small model-switch overflow fix (#188), smart-note sandbox serialization. One rebase conflict (`pi-historian-runner.ts` import collision) resolved — both `withContentLanguageDirective` and `getStreamBus` kept. `smart_drops: true` enabled in `~/.config/cortexkit/magic-context.jsonc`. Completed the half-applied `subagent-runner.ts` Windows spawn fix (commit `95a4b038`). DB schema unchanged (`LATEST_SUPPORTED_VERSION` still 49). Pre-existing `mc-stream.ts` tsc drift left as-is.
 - **Thinking content field:** Pi uses `block.thinking` for thinking blocks, not `block.text`. Any extraction code must check `b.thinking`.
